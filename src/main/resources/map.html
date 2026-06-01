@@ -1,0 +1,112 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Flight Radar Map</title>
+
+    <link rel="stylesheet"
+          href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
+          integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY="
+          crossorigin="" />
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
+            integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo="
+            crossorigin=""></script>
+
+    <style>
+        html, body { height: 100%; margin: 0; }
+        #map { height: 100%; width: 100%; background: #aadaff; }
+
+        /* Plane icon: an inline SVG rotated by heading via CSS transform. */
+        .plane-icon svg {
+            display: block;
+            fill: #1565c0;
+            stroke: #ffffff;
+            stroke-width: 1px;
+            filter: drop-shadow(0 0 1px rgba(0,0,0,0.4));
+        }
+        .plane-icon.on-ground svg { fill: #888888; }
+
+        .popup-callsign { font-weight: 600; font-size: 14px; }
+        .popup-row { font-size: 12px; color: #333; }
+    </style>
+</head>
+<body>
+    <div id="map"></div>
+
+    <script>
+        // Center on Europe (matches the client's default bounding box).
+        const map = L.map('map', { worldCopyJump: true }).setView([47.0, 9.0], 5);
+
+        L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
+            maxZoom: 19,
+            attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
+        }).addTo(map);
+
+        // icao24 -> Leaflet marker
+        const markers = new Map();
+
+        const PLANE_SVG =
+            '<svg width="26" height="26" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">' +
+            '<path d="M12 2 L14 9 L22 13 L22 15 L14 13 L13 19 L16 21 L16 22 L12 21 ' +
+            'L8 22 L8 21 L11 19 L10 13 L2 15 L2 13 L10 9 Z"/></svg>';
+
+        function planeIcon(headingDeg, onGround) {
+            const rotation = (typeof headingDeg === 'number') ? headingDeg : 0;
+            const cls = 'plane-icon' + (onGround ? ' on-ground' : '');
+            return L.divIcon({
+                className: cls,
+                html: '<div style="transform: rotate(' + rotation + 'deg);">' + PLANE_SVG + '</div>',
+                iconSize: [26, 26],
+                iconAnchor: [13, 13]
+            });
+        }
+
+        function fmt(value, suffix) {
+            return (value === null || value === undefined) ? '—' : (Math.round(value) + suffix);
+        }
+
+        function popupHtml(a) {
+            const callsign = (a.callsign && a.callsign.length) ? a.callsign : '(no callsign)';
+            return '<div class="popup-callsign">' + callsign + '</div>' +
+                '<div class="popup-row">' + (a.originCountry || '—') + '</div>' +
+                '<div class="popup-row">Alt: ' + fmt(a.baroAltitude, ' m') + '</div>' +
+                '<div class="popup-row">Speed: ' + fmt(a.velocity, ' m/s') + '</div>' +
+                '<div class="popup-row">Heading: ' + fmt(a.trueTrack, '°') + '</div>' +
+                (a.onGround ? '<div class="popup-row">On ground</div>' : '');
+        }
+
+        // Called from Java each poll with the full current list of aircraft.
+        window.updateAircraft = function (list) {
+            const seen = new Set();
+
+            list.forEach(function (a) {
+                if (a.latitude === null || a.longitude === null) { return; }
+                seen.add(a.icao24);
+
+                const pos = [a.latitude, a.longitude];
+                let marker = markers.get(a.icao24);
+
+                if (marker) {
+                    marker.setLatLng(pos);
+                    marker.setIcon(planeIcon(a.trueTrack, a.onGround));
+                    marker.setPopupContent(popupHtml(a));
+                } else {
+                    marker = L.marker(pos, { icon: planeIcon(a.trueTrack, a.onGround) })
+                        .bindPopup(popupHtml(a))
+                        .addTo(map);
+                    markers.set(a.icao24, marker);
+                }
+            });
+
+            // Remove aircraft no longer present in this batch.
+            markers.forEach(function (marker, icao24) {
+                if (!seen.has(icao24)) {
+                    map.removeLayer(marker);
+                    markers.delete(icao24);
+                }
+            });
+        };
+    </script>
+</body>
+</html>
