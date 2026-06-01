@@ -19,8 +19,23 @@ FlightRadarApp (JavaFX window)
 
 The poller fetches aircraft states off-thread, then the app marshals back onto the JavaFX
 Application Thread and calls the page's `updateAircraft(list)` JS function. Leaflet renders a
-rotated plane marker per aircraft, with a popup showing callsign, country, altitude, speed,
-and heading.
+rotated, gold plane marker per aircraft, with a popup showing callsign, country, altitude,
+speed, and heading.
+
+### Performance: zoom-based level of detail
+
+To stay smooth over busy regions, the map does **not** draw every aircraft at once. In
+`map.html`:
+
+- **Altitude level-of-detail** — when zoomed out, only the highest-altitude flights are shown;
+  the closer you zoom, the lower the altitude threshold (`minAltitudeForZoom`), until at
+  zoom ≥ 9 everything (including on-ground aircraft) appears.
+- **Viewport culling** — only aircraft within the visible map area (plus a small margin) are
+  drawn, so panning/zooming re-filters the already-fetched data without a new request.
+- **Marker cap** — a hard limit (`MAX_MARKERS`) keeps the highest flights if a region is still
+  dense. Tune `MAX_MARKERS` / `VIEWPORT_PADDING` at the top of the `map.html` script.
+
+A small overlay (top-right) shows how many of the fetched aircraft are currently displayed.
 
 ## Prerequisites
 

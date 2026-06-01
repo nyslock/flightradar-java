@@ -17,24 +17,44 @@
         html, body { height: 100%; margin: 0; }
         #map { height: 100%; width: 100%; background: #aadaff; }
 
-        /* Plane icon: an inline SVG rotated by heading via CSS transform. */
+        /* Plane icon: an inline SVG rotated by heading via CSS transform.
+           Gold fill to match FlightRadar's look. */
         .plane-icon svg {
             display: block;
-            fill: #1565c0;
-            stroke: #ffffff;
-            stroke-width: 1px;
-            filter: drop-shadow(0 0 1px rgba(0,0,0,0.4));
+            fill: #f8d000;
+            stroke: #5a4500;
+            stroke-width: 0.6px;
+            filter: drop-shadow(0 0 1.5px rgba(0,0,0,0.5));
         }
-        .plane-icon.on-ground svg { fill: #888888; }
+        .plane-icon.on-ground svg { fill: #b0b0b0; }
 
         .popup-callsign { font-weight: 600; font-size: 14px; }
         .popup-row { font-size: 12px; color: #333; }
+
+        /* Small status overlay (top-right). */
+        #info {
+            position: absolute; top: 10px; right: 10px; z-index: 1000;
+            background: rgba(33,33,33,0.82); color: #fff;
+            font: 12px/1.4 system-ui, sans-serif;
+            padding: 6px 10px; border-radius: 6px; pointer-events: none;
+            box-shadow: 0 1px 4px rgba(0,0,0,0.3);
+        }
+        #info b { color: #f8d000; }
     </style>
 </head>
 <body>
     <div id="map"></div>
+    <div id="info">starting…</div>
 
     <script>
+        // ---- Performance knobs -------------------------------------------------
+        // Hard cap on how many markers we ever draw at once (keeps the DOM light).
+        const MAX_MARKERS = 600;
+        // Padding (fraction) added around the visible map when culling off-screen
+        // aircraft, so planes don't pop in right at the edge.
+        const VIEWPORT_PADDING = 0.25;
+        // ------------------------------------------------------------------------
+
         // Center on Europe (matches the client's default bounding box).
         const map = L.map('map', { worldCopyJump: true }).setView([47.0, 9.0], 5);
 
@@ -43,8 +63,10 @@
             attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
         }).addTo(map);
 
-        // icao24 -> Leaflet marker
+        // icao24 -> Leaflet marker (only for currently-drawn aircraft)
         const markers = new Map();
+        // Full latest snapshot from Java; we re-filter this on every zoom/pan.
+        let allAircraft = [];
 
         const PLANE_SVG =
             '<svg width="26" height="26" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">' +
@@ -76,37 +98,93 @@
                 (a.onGround ? '<div class="popup-row">On ground</div>' : '');
         }
 
-        // Called from Java each poll with the full current list of aircraft.
-        window.updateAircraft = function (list) {
+        // Altitude level-of-detail: when zoomed out we only want the highest
+        // flights; the closer you zoom, the lower the altitude we let through.
+        // At zoom >= 9 everything (incl. on-ground) is allowed.
+        function minAltitudeForZoom(z) {
+            if (z <= 4) return 10000;
+            if (z === 5) return 7500;
+            if (z === 6) return 5000;
+            if (z === 7) return 3000;
+            if (z === 8) return 1500;
+            return -Infinity;
+        }
+
+        function altOf(a) {
+            return (typeof a.baroAltitude === 'number') ? a.baroAltitude : -Infinity;
+        }
+
+        // Filters the cached snapshot by altitude + viewport + cap, then performs a
+        // minimal add/move/remove against the live markers. Cheap to call often.
+        function render() {
+            const zoom = map.getZoom();
+            const minAlt = minAltitudeForZoom(zoom);
+            const bounds = map.getBounds().pad(VIEWPORT_PADDING);
+
+            let visible = allAircraft.filter(function (a) {
+                if (a.latitude == null || a.longitude == null) return false;
+                if (altOf(a) < minAlt) return false;                 // altitude LOD
+                return bounds.contains([a.latitude, a.longitude]);   // viewport cull
+            });
+
+            // If a dense area still exceeds the cap, keep the highest flights.
+            if (visible.length > MAX_MARKERS) {
+                visible.sort(function (x, y) { return altOf(y) - altOf(x); });
+                visible = visible.slice(0, MAX_MARKERS);
+            }
+
             const seen = new Set();
-
-            list.forEach(function (a) {
-                if (a.latitude === null || a.longitude === null) { return; }
+            visible.forEach(function (a) {
                 seen.add(a.icao24);
-
                 const pos = [a.latitude, a.longitude];
                 let marker = markers.get(a.icao24);
 
                 if (marker) {
                     marker.setLatLng(pos);
-                    marker.setIcon(planeIcon(a.trueTrack, a.onGround));
-                    marker.setPopupContent(popupHtml(a));
+                    // Only rebuild the icon when rotation/state actually changed.
+                    if (marker._hdg !== a.trueTrack || marker._ground !== a.onGround) {
+                        marker.setIcon(planeIcon(a.trueTrack, a.onGround));
+                        marker._hdg = a.trueTrack;
+                        marker._ground = a.onGround;
+                    }
+                    if (marker.isPopupOpen()) marker.setPopupContent(popupHtml(a));
                 } else {
                     marker = L.marker(pos, { icon: planeIcon(a.trueTrack, a.onGround) })
                         .bindPopup(popupHtml(a))
                         .addTo(map);
+                    marker._hdg = a.trueTrack;
+                    marker._ground = a.onGround;
                     markers.set(a.icao24, marker);
                 }
             });
 
-            // Remove aircraft no longer present in this batch.
+            // Drop markers that fell out of the visible/filtered set.
             markers.forEach(function (marker, icao24) {
                 if (!seen.has(icao24)) {
                     map.removeLayer(marker);
                     markers.delete(icao24);
                 }
             });
+
+            updateInfo(visible.length);
+        }
+
+        function updateInfo(shownCount) {
+            const total = allAircraft.length;
+            const hint = (minAltitudeForZoom(map.getZoom()) > -Infinity)
+                ? ' · zoom in for lower flights' : '';
+            document.getElementById('info').innerHTML =
+                'Showing <b>' + shownCount + '</b> of ' + total + ' aircraft' + hint;
+        }
+
+        // Called from Java each poll with the full current list of aircraft.
+        window.updateAircraft = function (list) {
+            allAircraft = Array.isArray(list) ? list : [];
+            render();
         };
+
+        // Re-filter (no new data needed) whenever the user zooms or pans.
+        map.on('zoomend moveend', render);
     </script>
 </body>
 </html>
